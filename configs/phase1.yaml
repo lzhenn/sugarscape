@@ -1,0 +1,22 @@
+seed: 42
+
+simulation:
+  max_ticks: 5000
+
+agents:
+  count: 500
+  initial_wealth: 100.0
+
+interaction:
+  type: random_exchange
+  amount: 1.0
+
+matcher:
+  selector: random
+  factors: []
+
+viz:
+  fps: 30
+  bins: 50
+  x_max: 500
+  output: "output/wealth_distribution.mp4"
