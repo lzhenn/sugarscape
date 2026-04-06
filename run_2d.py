@@ -47,11 +47,19 @@ def main():
     bins = viz_cfg.get("bins", 50)
 
     # Build agents with random grid positions
+    smart_fraction = config.get("smart_fraction", 0.0)
+    n_smart = int(n_agents * smart_fraction)
     agents = []
-    for _ in range(n_agents):
+    for i in range(n_agents):
         a = CoinAgent(initial_wealth=initial_wealth, rng=rng)
         a.grid_pos = (rng.randint(0, grid_size - 1), rng.randint(0, grid_size - 1))
         agents.append(a)
+    # Randomly assign can_refuse to n_smart agents
+    smart_indices = rng.sample(range(n_agents), n_smart)
+    for i in smart_indices:
+        agents[i].can_refuse = True
+    if n_smart:
+        print(f"  smart agents (can_refuse): {n_smart} ({smart_fraction*100:.0f}%)")
 
     # Build environment
     selector = Grid2DSelector(grid_size=grid_size, radius=radius)

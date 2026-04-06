@@ -8,7 +8,8 @@ agents:
 interaction:
   type: yard_sale
   fraction: 0.2
-  poor_advantage: 0.05
+  poor_advantage: 0.0
+smart_fraction: 0.1
 absorbing_wall: true
 movement: true
 matcher:

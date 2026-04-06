@@ -221,6 +221,8 @@ class Grid2DSelector(Selector):
                     nr, nc = (r + dr) % G, (c + dc) % G
                     for b in cell_map.get((nr, nc), []):
                         if b.id != a.id and b.id not in matched:
+                            if a.can_refuse and b.wealth() > a.wealth():
+                                continue  # smart agent refuses richer opponents
                             candidates.append(b)
 
             if not candidates:
