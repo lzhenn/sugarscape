@@ -20,6 +20,30 @@ class Event(ABC):
     def execute(self, env: Environment, rng: random.Random) -> None: ...
 
 
+class GridMovementEvent(Event):
+    """Move each agent one step on a 2D torus grid each tick.
+
+    Each alive agent with a grid_pos picks one of 9 directions uniformly
+    at random (8 compass directions + stay) and moves accordingly.
+    """
+
+    _DIRECTIONS = [(dr, dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)]
+
+    def __init__(self, grid_size: int = 200):
+        self.grid_size = grid_size
+
+    def should_trigger(self, tick: int, env: Environment) -> bool:
+        return True
+
+    def execute(self, env: Environment, rng: random.Random) -> None:
+        G = self.grid_size
+        for a in env.agents:
+            if a.alive and a.grid_pos is not None:
+                r, c = a.grid_pos
+                dr, dc = rng.choice(self._DIRECTIONS)
+                a.grid_pos = ((r + dr) % G, (c + dc) % G)
+
+
 class Environment:
     """Holds all agents and orchestrates matching, interaction, and lifecycle."""
 

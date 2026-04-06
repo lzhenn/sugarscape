@@ -49,13 +49,17 @@ class Agent(ABC):
 
     _next_id: int = 0
 
-    def __init__(self, portfolio: Portfolio, rng: random.Random):
+    def __init__(self, portfolio: Portfolio, rng: random.Random,
+                 position: float | None = None,
+                 grid_pos: tuple[int, int] | None = None):
         self.id: int = Agent._next_id
         Agent._next_id += 1
         self.portfolio: Portfolio = portfolio
         self.rng: random.Random = rng
         self.alive: bool = True
         self.age: int = 0
+        self.position: float | None = position
+        self.grid_pos: tuple[int, int] | None = grid_pos
 
     @abstractmethod
     def step(self) -> None:

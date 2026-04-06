@@ -1,0 +1,19 @@
+seed: 42
+simulation:
+  max_ticks: 1000
+  grid_size: 200
+agents:
+  count: 500
+  initial_wealth: 100.0
+interaction:
+  type: random_exchange
+  amount: 10.0
+matcher:
+  selector: grid2d
+  radius: 5
+viz:
+  fps: 20
+  sample_every: 5
+  x_max: 600
+  bins: 50
+  output: "output/geo2d.mp4"
