@@ -9,8 +9,8 @@ import random
 import yaml
 
 from src.agent import Agent, CoinAgent
-from src.environment import Environment, GridMovementEvent
-from src.interaction import RandomExchange
+from src.environment import Environment, BankruptcyWall, GridMovementEvent
+from src.interaction import RandomExchange, YardSaleExchange
 from src.matcher import Grid2DSelector, Matcher, WeightedSumCombiner
 from src.stats import StatsCollector
 
@@ -56,9 +56,20 @@ def main():
     # Build environment
     selector = Grid2DSelector(grid_size=grid_size, radius=radius)
     matcher = Matcher(factors=[], combiner=WeightedSumCombiner(), selector=selector)
-    interaction = RandomExchange(amount=config["interaction"]["amount"])
-    movement = GridMovementEvent(grid_size=grid_size)
-    env = Environment(matcher=matcher, interaction=interaction, events=[movement])
+    interaction_cfg = config["interaction"]
+    if interaction_cfg["type"] == "yard_sale":
+        interaction = YardSaleExchange(
+            fraction=interaction_cfg.get("fraction", 0.2),
+            poor_advantage=interaction_cfg.get("poor_advantage", 0.0),
+        )
+    else:
+        interaction = RandomExchange(amount=interaction_cfg.get("amount", 1.0))
+    events = []
+    if config.get("movement", True):
+        events.append(GridMovementEvent(grid_size=grid_size))
+    if config.get("absorbing_wall", False):
+        events.append(BankruptcyWall())
+    env = Environment(matcher=matcher, interaction=interaction, events=events)
     env.add_agents(agents)
 
     stats = StatsCollector()

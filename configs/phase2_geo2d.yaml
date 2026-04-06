@@ -6,8 +6,11 @@ agents:
   count: 500
   initial_wealth: 100.0
 interaction:
-  type: random_exchange
-  amount: 10.0
+  type: yard_sale
+  fraction: 0.2
+  poor_advantage: 0.05
+absorbing_wall: true
+movement: true
 matcher:
   selector: grid2d
   radius: 5

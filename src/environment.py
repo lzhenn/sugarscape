@@ -20,6 +20,18 @@ class Event(ABC):
     def execute(self, env: Environment, rng: random.Random) -> None: ...
 
 
+class BankruptcyWall(Event):
+    """Kill any agent whose wealth drops to zero or below."""
+
+    def should_trigger(self, tick: int, env: Environment) -> bool:
+        return True
+
+    def execute(self, env: Environment, rng: random.Random) -> None:
+        for a in env.agents:
+            if a.alive and a.wealth() <= 0:
+                a.alive = False
+
+
 class GridMovementEvent(Event):
     """Move each agent one step on a 2D torus grid each tick.
 
