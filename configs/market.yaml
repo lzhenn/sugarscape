@@ -1,0 +1,28 @@
+seed: 42
+simulation:
+  max_ticks: 1000
+  grid_size: 200
+agents:
+  count: 1000
+  initial_coin: 100.0
+  initial_nec: 50.0        # 50 ticks of consumption buffer
+economy:
+  consumption_rate: 1.0    # nec consumed per agent per tick
+  min_reserve: 1.0         # min nec a seller keeps before selling
+farms:
+  # 5 farms in dice pattern on 200x200 grid
+  centers:
+    - [50,  50]
+    - [50,  150]
+    - [100, 100]
+    - [150, 50]
+    - [150, 150]
+  radius: 30
+matcher:
+  selector: grid2d
+  radius: 5
+movement: true
+viz:
+  fps: 20
+  sample_every: 5
+  output: "output/market.mp4"

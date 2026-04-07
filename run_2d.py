@@ -9,7 +9,7 @@ import random
 import yaml
 
 from src.agent import Agent, CoinAgent
-from src.environment import Environment, BankruptcyWall, GridMovementEvent
+from src.environment import Environment, BankruptcyWall, GridMovementEvent, MiningEvent
 from src.interaction import RandomExchange, YardSaleExchange
 from src.matcher import Grid2DSelector, Matcher, WeightedSumCombiner
 from src.stats import StatsCollector
@@ -49,6 +49,8 @@ def main():
     # Build agents with random grid positions
     smart_fraction = config.get("smart_fraction", 0.0)
     n_smart = int(n_agents * smart_fraction)
+    chase_fraction = config.get("chase_fraction", 0.0)
+    n_chase = int(n_agents * chase_fraction)
     agents = []
     for i in range(n_agents):
         a = CoinAgent(initial_wealth=initial_wealth, rng=rng)
@@ -60,6 +62,15 @@ def main():
         agents[i].can_refuse = True
     if n_smart:
         print(f"  smart agents (can_refuse): {n_smart} ({smart_fraction*100:.0f}%)")
+    # Randomly assign chase_wealth to n_chase agents (non-overlapping with smart)
+    remaining = [i for i in range(n_agents) if i not in set(smart_indices)]
+    chase_indices = rng.sample(remaining, min(n_chase, len(remaining)))
+    chase_ids: set[int] = set()
+    for i in chase_indices:
+        agents[i].chase_wealth = True
+        chase_ids.add(agents[i].id)
+    if n_chase:
+        print(f"  chase agents (wealth-seeking move): {n_chase} ({chase_fraction*100:.0f}%)")
 
     # Build environment
     selector = Grid2DSelector(grid_size=grid_size, radius=radius)
@@ -72,11 +83,21 @@ def main():
         )
     else:
         interaction = RandomExchange(amount=interaction_cfg.get("amount", 1.0))
+    mining_cfg = config.get("mining", None)
+    mining_center = None
+    mining_radius = None
+
     events = []
     if config.get("movement", True):
         events.append(GridMovementEvent(grid_size=grid_size))
     if config.get("absorbing_wall", False):
         events.append(BankruptcyWall())
+    if mining_cfg:
+        mining_center = tuple(mining_cfg["center"])
+        mining_radius = mining_cfg["radius"]
+        mining_income = mining_cfg.get("income", 1.0)
+        events.append(MiningEvent(center=mining_center, radius=mining_radius, income=mining_income))
+        print(f"  mining zone: center={mining_center}, R={mining_radius}, income={mining_income}/tick")
     env = Environment(matcher=matcher, interaction=interaction, events=events)
     env.add_agents(agents)
 
@@ -90,6 +111,15 @@ def main():
         env.process_events(tick, rng)
         pairs = env.do_matching(rng)
         results = env.do_interactions(pairs, rng)
+        # Update partner memory for chase agents
+        if n_chase:
+            for a, b in pairs:
+                if a.chase_wealth and b.grid_pos is not None:
+                    a._last_partner_pos = b.grid_pos
+                    a._last_partner_wealth = b.wealth()
+                if b.chase_wealth and a.grid_pos is not None:
+                    b._last_partner_pos = a.grid_pos
+                    b._last_partner_wealth = a.wealth()
         env.do_lifecycle()
         stats.record_tick(tick, env.agents, results)
 
@@ -117,6 +147,20 @@ def main():
     print(f"\nFinal: agents={final['num_agents']} | mean={final['mean_wealth']:.1f} "
           f"| gini={final['gini']:.3f} | snapshots={len(position_snapshots)}")
 
+    # Chase vs normal breakdown
+    if n_chase:
+        import numpy as np
+        from scipy import stats as scipy_stats
+        alive = [a for a in env.agents if a.alive]
+        chase_w = np.array([a.wealth() for a in alive if a.id in chase_ids])
+        normal_w = np.array([a.wealth() for a in alive if a.id not in chase_ids])
+        print(f"\n=== Chase vs Normal (final tick) ===")
+        for label, arr in [("Chase", chase_w), ("Normal", normal_w)]:
+            print(f"  {label}: n={len(arr)}, mean={arr.mean():.1f}, "
+                  f"median={np.median(arr):.1f}, max={arr.max():.1f}, cv={arr.std()/arr.mean():.2f}")
+        stat, p = scipy_stats.mannwhitneyu(chase_w, normal_w, alternative="two-sided")
+        print(f"  Mann-Whitney U: U={stat:.0f}, p={p:.4f} ({'significant' if p < 0.05 else 'not significant'} at α=0.05)")
+
     if not args.no_viz:
         os.makedirs(os.path.dirname(output), exist_ok=True)
         from viz.animate_2d import animate_2d
@@ -127,6 +171,8 @@ def main():
             bins=bins,
             fps=fps,
             output=output,
+            mining_center=mining_center,
+            mining_radius=mining_radius,
         )
 
 

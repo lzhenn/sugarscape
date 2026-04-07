@@ -1,0 +1,27 @@
+seed: 42
+simulation:
+  max_ticks: 1000
+  grid_size: 200
+agents:
+  count: 1000
+  initial_wealth: 100.0
+interaction:
+  type: random_exchange
+  amount: 10.0
+smart_fraction: 0.0
+chase_fraction: 0.1
+absorbing_wall: true
+movement: true
+matcher:
+  selector: grid2d
+  radius: 5
+mining:
+  center: [100, 100]
+  radius: 30
+  income: 1.0
+viz:
+  fps: 20
+  sample_every: 5
+  x_max: 800
+  bins: 60
+  output: "output/mining.mp4"

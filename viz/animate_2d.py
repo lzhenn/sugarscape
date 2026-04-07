@@ -7,6 +7,7 @@ import math
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.collections as mc
+import matplotlib.patches as mpatches
 import numpy as np
 
 
@@ -17,6 +18,8 @@ def animate_2d(
     bins: int = 50,
     fps: int = 20,
     output: str | None = None,
+    mining_center: tuple[int, int] | None = None,
+    mining_radius: int | None = None,
 ) -> None:
     """Animate spatial wealth map alongside wealth histogram.
 
@@ -48,6 +51,16 @@ def animate_2d(
     pair_lc = mc.LineCollection([], colors="limegreen", linewidths=0.8,
                                 alpha=0.6, zorder=2)
     ax_map.add_collection(pair_lc)
+
+    # Mining zone circle overlay (col=x, row=y)
+    if mining_center is not None and mining_radius is not None:
+        mine_circle = mpatches.Circle(
+            (mining_center[1], mining_center[0]),  # (x=col, y=row)
+            mining_radius,
+            fill=False, edgecolor="gold", linewidth=1.5, linestyle="--",
+            alpha=0.8, zorder=4,
+        )
+        ax_map.add_patch(mine_circle)
 
     # --- Histogram setup ---
     ax_hist.set_xlim(0, x_max)

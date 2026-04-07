@@ -61,6 +61,9 @@ class Agent(ABC):
         self.position: float | None = position
         self.grid_pos: tuple[int, int] | None = grid_pos
         self.can_refuse: bool = False  # if True, refuses to trade with wealthier agents
+        self.chase_wealth: bool = False  # if True, moves toward richer / away from poorer last partner
+        self._last_partner_pos: tuple[int, int] | None = None
+        self._last_partner_wealth: float | None = None
 
     @abstractmethod
     def step(self) -> None:

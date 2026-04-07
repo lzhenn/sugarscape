@@ -1,0 +1,23 @@
+seed: 42
+simulation:
+  max_ticks: 10000
+  grid_size: 300
+agents:
+  count: 5000
+  initial_wealth: 100.0
+interaction:
+  type: yard_sale
+  fraction: 0.2
+  poor_advantage: 0.0
+smart_fraction: 0.1
+absorbing_wall: true
+movement: true
+matcher:
+  selector: grid2d
+  radius: 5
+viz:
+  fps: 20
+  sample_every: 50
+  x_max: 1000
+  bins: 50
+  output: "output/scale_5k.mp4"
