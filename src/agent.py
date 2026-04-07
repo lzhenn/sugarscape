@@ -64,6 +64,18 @@ class Agent(ABC):
         self.chase_wealth: bool = False  # if True, moves toward richer / away from poorer last partner
         self._last_partner_pos: tuple[int, int] | None = None
         self._last_partner_wealth: float | None = None
+        # Nec supplier tracking: follow the agent with most nec seen, while partner.nec > self.nec
+        self._nec_target: "Agent | None" = None
+        # Farm memory: last known farm center; agent returns here if off farm
+        self._last_farm_pos: tuple[int, int] | None = None
+        # Garden memory: last known garden center; agent seeks it when nec is abundant
+        self._last_garden_pos: tuple[int, int] | None = None
+        # Flowers: list of tick numbers when each flower was acquired (for decay)
+        self._flower_ticks: list[int] = []
+
+    @property
+    def flower_count(self) -> int:
+        return len(self._flower_ticks)
 
     @abstractmethod
     def step(self) -> None:

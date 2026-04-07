@@ -13,11 +13,14 @@ import numpy as np
 from src.agent import Agent, CoinAgent, Portfolio
 from src.environment import (
     Environment,
+    CoinRedistributionEvent,
+    GardenEvent,
     GridMovementEvent,
     NecessityLifecycleEvent,
+    NecRedistributionEvent,
     StarvationWall,
 )
-from src.interaction import NecessityTradeInteraction
+from src.interaction import MarketInteraction
 from src.matcher import Grid2DSelector, Matcher, WeightedSumCombiner
 
 
@@ -43,13 +46,29 @@ def main():
     initial_coin = agent_cfg["initial_coin"]
     initial_nec  = agent_cfg["initial_nec"]
 
-    eco_cfg          = config["economy"]
-    consumption_rate = eco_cfg["consumption_rate"]
-    min_reserve      = eco_cfg["min_reserve"]
+    eco_cfg              = config["economy"]
+    consumption_rate     = eco_cfg["consumption_rate"]
+    min_reserve          = eco_cfg["min_reserve"]
+    nec_luxury_ticks     = eco_cfg.get("nec_luxury_ticks", 200)
+    nec_luxury           = nec_luxury_ticks * consumption_rate
+    nec_tax_cfg          = eco_cfg.get("nec_tax", {})
+    nec_tax_start        = nec_tax_cfg.get("start_tick", 0)
+    nec_tax_interval     = nec_tax_cfg.get("interval", 100)
+    nec_tax_delay        = nec_tax_cfg.get("delay_ticks", 50)
+    nec_tax_top          = nec_tax_cfg.get("top_fraction", 0.01)
+    nec_tax_rate         = nec_tax_cfg.get("tax_rate", 0.1)
+    nec_tax_bottom       = nec_tax_cfg.get("bottom_fraction", 0.1)
+
+    farm_production      = config["farms"].get("production", 1.0)
 
     farm_cfg     = config["farms"]
     farm_centers = [tuple(c) for c in farm_cfg["centers"]]
     farm_radius  = farm_cfg["radius"]
+
+    garden_cfg      = config.get("garden", {})
+    garden_center   = tuple(garden_cfg.get("center", [50, 50]))
+    garden_radius   = garden_cfg.get("radius", 30)
+    flower_max_age  = garden_cfg.get("flower_max_age", 50)
 
     radius = config.get("matcher", {}).get("radius", 5)
 
@@ -78,23 +97,53 @@ def main():
         a.grid_pos = (rng.randint(0, grid_size - 1), rng.randint(0, grid_size - 1))
         agents.append(a)
 
-    # Events (tick order): move → [consume + farm produce] → starvation wall
+    # Precompute farm and garden cells
+    farm_cells: set[tuple[int, int]] = set()
+    for cx, cy in farm_centers:
+        for row in range(grid_size):
+            for col in range(grid_size):
+                if (row - cx) ** 2 + (col - cy) ** 2 <= farm_radius ** 2:
+                    farm_cells.add((row, col))
+
+    garden_cells: set[tuple[int, int]] = set()
+    gcx, gcy = garden_center
+    for row in range(grid_size):
+        for col in range(grid_size):
+            if (row - gcx) ** 2 + (col - gcy) ** 2 <= garden_radius ** 2:
+                garden_cells.add((row, col))
+
+    print(f"Garden coverage: {len(garden_cells)/grid_size**2*100:.1f}% of map")
+
+    # Events (tick order): move → [consume + farm produce] → garden → starvation wall
     events = [
-        GridMovementEvent(grid_size=grid_size),
+        GridMovementEvent(grid_size=grid_size, farm_cells=farm_cells,
+                          garden_cells=garden_cells,
+                          nec_luxury=nec_luxury, consumption_rate=consumption_rate),
         NecessityLifecycleEvent(
             farm_centers=farm_centers,
             radius=farm_radius,
             grid_size=grid_size,
             consumption_rate=consumption_rate,
+            production_rate=farm_production,
+        ),
+        GardenEvent(garden_cells=garden_cells),
+        NecRedistributionEvent(
+            start_tick=nec_tax_start,
+            interval=nec_tax_interval,
+            delay_ticks=nec_tax_delay,
+            top_fraction=nec_tax_top,
+            tax_rate=nec_tax_rate,
+            bottom_fraction=nec_tax_bottom,
         ),
         StarvationWall(),
     ]
 
     selector    = Grid2DSelector(grid_size=grid_size, radius=radius)
     matcher     = Matcher(factors=[], combiner=WeightedSumCombiner(), selector=selector)
-    interaction = NecessityTradeInteraction(
+    interaction = MarketInteraction(
         consumption_rate=consumption_rate,
         min_reserve=min_reserve,
+        nec_threshold=nec_luxury,
     )
 
     env = Environment(matcher=matcher, interaction=interaction, events=events)
@@ -109,23 +158,52 @@ def main():
 
     print(f"\nRunning {max_ticks} ticks | {n_agents} agents | {grid_size}×{grid_size} | R={radius}")
     print(f"{'tick':>6} | {'trades':>6} | {'avg_price':>9} | {'starving':>8} | "
-          f"{'mean_coin':>9} | {'mean_nec':>8} | {'nec_total':>9}")
-    print("-" * 80)
+          f"{'mean_coin':>9} | {'mean_nec':>8} | {'mean_❀':>8} | {'f-trades':>8}")
+    print("-" * 90)
 
     for tick in range(max_ticks):
         env.process_events(tick, rng)
         pairs   = env.do_matching(rng)
         results = env.do_interactions(pairs, rng)
+
+        # Knowledge propagation: only on successful nec trade, seller → buyer
+        for (a, b), result in zip(pairs, results):
+            if not result.get("trade"):
+                continue
+            seller_id = result.get("seller_id")
+            sender  = a if a.id == seller_id else b
+            receiver = b if a.id == seller_id else a
+            if receiver._last_farm_pos is None and sender._last_farm_pos is not None:
+                receiver._last_farm_pos = sender._last_farm_pos
+            if receiver._last_garden_pos is None and sender._last_garden_pos is not None:
+                receiver._last_garden_pos = sender._last_garden_pos
+
         env.do_lifecycle()
+
+        # Update farm memory and decay flowers; update garden memory
+        for a in env.agents:
+            if not a.alive:
+                continue
+            # Flower decay: remove flowers older than flower_max_age
+            a._flower_ticks = [t for t in a._flower_ticks if tick - t < flower_max_age]
+            # Farm memory: record nearest farm center when on farm
+            if a.grid_pos in farm_cells:
+                r, c = a.grid_pos
+                a._last_farm_pos = min(farm_centers, key=lambda fc: (fc[0]-r)**2 + (fc[1]-c)**2)
+            # Garden memory: record garden center when on garden
+            if a.grid_pos in garden_cells:
+                a._last_garden_pos = garden_center
 
         # Collect stats
         alive = [a for a in env.agents if a.alive]
-        trades     = [r for r in results if r.get("trade")]
-        n_trades   = len(trades)
-        n_starving = sum(1 for a in alive if a.portfolio.get("nec") == 0)
-        avg_price  = (sum(r["price"] for r in trades) / n_trades) if trades else float("nan")
-        mean_coin  = np.mean([a.portfolio.get("coin") for a in alive]) if alive else 0
-        mean_nec   = np.mean([a.portfolio.get("nec")  for a in alive]) if alive else 0
+        trades        = [r for r in results if r.get("trade")]
+        flower_trades = [r for r in results if r.get("flower_trade")]
+        n_trades      = len(trades)
+        n_starving    = sum(1 for a in alive if a.portfolio.get("nec") == 0)
+        avg_price     = (sum(r["price"] for r in trades) / n_trades) if trades else float("nan")
+        mean_coin     = np.mean([a.portfolio.get("coin") for a in alive]) if alive else 0
+        mean_nec      = np.mean([a.portfolio.get("nec")  for a in alive]) if alive else 0
+        mean_flowers  = np.mean([a.flower_count for a in alive]) if alive else 0
         total_nec_now = sum(a.portfolio.get("nec") for a in alive)
 
         price_history.append(avg_price)
@@ -134,12 +212,12 @@ def main():
 
         if (tick + 1) % 100 == 0:
             print(f"{tick+1:>6} | {n_trades:>6} | {avg_price:>9.3f} | {n_starving:>8} | "
-                  f"{mean_coin:>9.1f} | {mean_nec:>8.2f} | {total_nec_now:>9.1f}")
+                  f"{mean_coin:>9.1f} | {mean_nec:>8.2f} | {mean_flowers:>7.2f}❀ | {len(flower_trades):>4}f-trades")
 
         if tick % sample_every == 0:
             snap_agents = [
                 (a.grid_pos[0], a.grid_pos[1],
-                 a.portfolio.get("coin"), a.portfolio.get("nec"))
+                 a.portfolio.get("coin"), a.portfolio.get("nec"), a.flower_count)
                 for a in alive if a.grid_pos is not None
             ]
             snap_pairs = [
@@ -176,19 +254,19 @@ def main():
 
     if not args.no_viz:
         os.makedirs(os.path.dirname(output), exist_ok=True)
-        _animate_market(snapshots, grid_size, farm_centers, farm_radius, eq_price, fps, output)
+        _animate_market(snapshots, grid_size, farm_centers, farm_radius,
+                        garden_center, garden_radius, eq_price, fps, output)
 
 
-def _animate_market(snapshots, grid_size, farm_centers, farm_radius, eq_price, fps, output):
+def _animate_market(snapshots, grid_size, farm_centers, farm_radius,
+                    garden_center, garden_radius, eq_price, fps, output):
     import matplotlib.pyplot as plt
     import matplotlib.animation as animation
-    import matplotlib.collections as mc
     import matplotlib.patches as mpatches
     import numpy as np
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    ax_coin, ax_nec = axes[0]
-    ax_price, ax_hist = axes[1]
+    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+    (ax_coin, ax_nec, ax_flower), (ax_dcoin, ax_dnec, ax_dflower) = axes
     fig.tight_layout(pad=3.0)
 
     def setup_map(ax, title, cmap, vmax):
@@ -196,37 +274,39 @@ def _animate_market(snapshots, grid_size, farm_centers, farm_radius, eq_price, f
         ax.set_ylim(-0.5, grid_size - 0.5)
         ax.set_aspect("equal")
         ax.set_facecolor("#111111")
-        ax.set_title(title)
+        ax.set_title(title, fontsize=10)
         scat = ax.scatter([], [], s=4, c=[], cmap=cmap, vmin=0, vmax=vmax, alpha=0.9)
         fig.colorbar(scat, ax=ax, fraction=0.03, pad=0.02)
-        # Draw farm circles
+        # Farm circles (gold dashed)
         for cr, cc in farm_centers:
-            circle = mpatches.Circle((cc, cr), farm_radius, fill=False,
-                                     edgecolor="gold", linewidth=1.2, linestyle="--", alpha=0.7)
-            ax.add_patch(circle)
+            ax.add_patch(mpatches.Circle(
+                (cc, cr), farm_radius, fill=False,
+                edgecolor="gold", linewidth=1.2, linestyle="--", alpha=0.8))
+        # Garden circle (red solid)
+        gcr, gcc = garden_center
+        ax.add_patch(mpatches.Circle(
+            (gcc, gcr), garden_radius, fill=False,
+            edgecolor="red", linewidth=1.5, linestyle="-", alpha=0.9))
         return scat
 
-    scat_coin = setup_map(ax_coin, "coin", "plasma",  500)
-    scat_nec  = setup_map(ax_nec,  "nec",  "YlGn",    100)
+    scat_coin   = setup_map(ax_coin,   "coin",    "plasma", 500)
+    scat_nec    = setup_map(ax_nec,    "nec",     "YlGn",   50)
+    scat_flower = setup_map(ax_flower, "❀ flower", "cool",   20)
 
-    # Price time series
-    ax_price.set_xlabel("tick")
-    ax_price.set_ylabel("avg trade price (coin/nec)")
-    ax_price.axhline(eq_price, color="red", linewidth=1.5, linestyle="--", label=f"eq={eq_price:.2f}")
-    ax_price.legend(fontsize=8)
-    price_line, = ax_price.plot([], [], "b-", linewidth=1, alpha=0.8)
-    ax_price.set_xlim(0, len(snapshots) * (snapshots[1]["tick"] - snapshots[0]["tick"]) if len(snapshots) > 1 else 1000)
-    ax_price.set_ylim(0, eq_price * 4)
+    def setup_dist(ax, xlabel, color, xmax, bins=40):
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel("count", fontsize=9)
+        edges = np.linspace(0, xmax, bins + 1)
+        centers = (edges[:-1] + edges[1:]) / 2
+        bars = ax.bar(centers, np.zeros(bins), width=edges[1]-edges[0],
+                      color=color, alpha=0.75)
+        return bars, edges
 
-    # Nec histogram
-    ax_hist.set_xlabel("nec")
-    ax_hist.set_ylabel("count")
-    bins = np.linspace(0, 100, 50)
-    bar_centers = (bins[:-1] + bins[1:]) / 2
-    bars = ax_hist.bar(bar_centers, np.zeros(len(bar_centers)), width=bins[1]-bins[0], color="seagreen", alpha=0.7)
+    bars_coin,   edges_coin   = setup_dist(ax_dcoin,   "coin",    "mediumpurple", 800)
+    bars_nec,    edges_nec    = setup_dist(ax_dnec,    "nec",     "seagreen",     80)
+    bars_flower, edges_flower = setup_dist(ax_dflower, "❀ count", "steelblue",    30, bins=30)
 
-    title = fig.suptitle("", fontsize=11)
-    price_xs, price_ys = [], []
+    title = fig.suptitle("", fontsize=12)
 
     def update(fi):
         snap = snapshots[fi]
@@ -235,35 +315,36 @@ def _animate_market(snapshots, grid_size, farm_centers, farm_radius, eq_price, f
         if not agents_data:
             return
 
-        cols   = [d[1] for d in agents_data]
-        rows   = [d[0] for d in agents_data]
-        coins  = [d[2] for d in agents_data]
-        necs   = [d[3] for d in agents_data]
+        cols    = np.array([d[1] for d in agents_data])
+        rows    = np.array([d[0] for d in agents_data])
+        coins   = np.array([d[2] for d in agents_data])
+        necs    = np.array([d[3] for d in agents_data])
+        flowers = np.array([d[4] for d in agents_data])
+        xy = np.column_stack([cols, rows])
 
-        scat_coin.set_offsets(np.column_stack([cols, rows]))
-        scat_coin.set_array(np.array(coins))
-        scat_nec.set_offsets(np.column_stack([cols, rows]))
-        scat_nec.set_array(np.array(necs))
+        for scat, vals in ((scat_coin, coins), (scat_nec, necs), (scat_flower, flowers)):
+            scat.set_offsets(xy)
+            scat.set_array(vals)
 
-        # Price series
+        for bars, edges, vals in (
+            (bars_coin,   edges_coin,   coins),
+            (bars_nec,    edges_nec,    necs),
+            (bars_flower, edges_flower, flowers),
+        ):
+            counts, _ = np.histogram(vals, bins=edges)
+            for bar, h in zip(bars, counts):
+                bar.set_height(h)
+            bars[0].axes.set_ylim(0, max(counts.max() * 1.15, 5))
+
         p = snap.get("avg_price", float("nan"))
-        if not math.isnan(p):
-            price_xs.append(tick)
-            price_ys.append(p)
-        price_line.set_data(price_xs, price_ys)
-
-        # Nec histogram
-        counts, _ = np.histogram(necs, bins=bins)
-        for bar, h in zip(bars, counts):
-            bar.set_height(h)
-        ax_hist.set_ylim(0, max(counts.max() * 1.15, 10))
-
-        n_starving = sum(1 for n in necs if n == 0)
         avg_p = f"{p:.3f}" if not math.isnan(p) else "n/a"
-        title.set_text(f"Tick {tick} | n={len(agents_data)} | starving={n_starving} | price={avg_p}")
+        mean_f = flowers.mean() if len(flowers) else 0
+        title.set_text(
+            f"Tick {tick} | n={len(agents_data)} | price={avg_p} | mean❀={mean_f:.1f}"
+        )
 
     ani = animation.FuncAnimation(fig, update, frames=len(snapshots), interval=1000//fps, blit=False)
-    writer = animation.FFMpegWriter(fps=fps, bitrate=1800)
+    writer = animation.FFMpegWriter(fps=fps, bitrate=2400)
     ani.save(output, writer=writer)
     print(f"Saved: {output}")
     plt.close(fig)

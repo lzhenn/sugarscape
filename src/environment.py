@@ -41,31 +41,59 @@ class GridMovementEvent(Event):
 
     _DIRECTIONS = [(dr, dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)]
 
-    def __init__(self, grid_size: int = 200):
+    def __init__(self, grid_size: int = 200, farm_cells: set | None = None,
+                 garden_cells: set | None = None,
+                 nec_luxury: float = 20.0, consumption_rate: float = 0.1):
         self.grid_size = grid_size
+        self._farm_cells: set = farm_cells or set()
+        self._garden_cells: set = garden_cells or set()
+        self._nec_luxury = nec_luxury
+        self._consumption_rate = consumption_rate
 
     def should_trigger(self, tick: int, env: Environment) -> bool:
         return True
 
     def execute(self, env: Environment, rng: random.Random) -> None:
         G = self.grid_size
-        for a in env.agents:
-            if not a.alive or a.grid_pos is None:
-                continue
+        occupied = {a.grid_pos for a in env.agents if a.alive and a.grid_pos is not None}
+        order = [a for a in env.agents if a.alive and a.grid_pos is not None]
+        rng.shuffle(order)
+        for a in order:
             r, c = a.grid_pos
-            if a.chase_wealth and a._last_partner_pos is not None and a._last_partner_wealth is not None:
-                pr, pc = a._last_partner_pos
-                # Sign of direction vector toward last partner (no torus correction, cheapest)
-                dr = (pr > r) - (pr < r)
-                dc = (pc > c) - (pc < c)
-                if a._last_partner_wealth == a.wealth() or (dr == 0 and dc == 0):
-                    dr, dc = rng.choice(self._DIRECTIONS)  # tied wealth or same cell → random
-                elif a._last_partner_wealth < a.wealth():
-                    dr, dc = -dr, -dc  # partner poorer → move away
-                # else partner richer → move toward (dr, dc already correct)
+            nec = a.portfolio.get("nec")
+            # Priority 1: knows farm + off farm + nec barely enough to return → head back
+            if a._last_farm_pos is not None and (r, c) not in self._farm_cells:
+                fr, fc = a._last_farm_pos
+                steps_to_farm = max(abs(fr - r), abs(fc - c))  # Chebyshev distance
+                nec_needed = steps_to_farm * self._consumption_rate
+                if nec <= nec_needed:
+                    dr = (fr > r) - (fr < r)
+                    dc = (fc > c) - (fc < c)
+                    if dr == 0 and dc == 0:
+                        dr, dc = rng.choice(self._DIRECTIONS)
+                else:
+                    dr = None  # nec sufficient → fall through to lower priorities
             else:
-                dr, dc = rng.choice(self._DIRECTIONS)
-            a.grid_pos = ((r + dr) % G, (c + dc) % G)
+                dr = None
+
+            if dr is None:
+                # Priority 2: nec above luxury threshold + knows garden → seek flowers
+                if (nec > self._nec_luxury
+                        and a._last_garden_pos is not None
+                        and (r, c) not in self._garden_cells):
+                    gr, gc = a._last_garden_pos
+                    dr = (gr > r) - (gr < r)
+                    dc = (gc > c) - (gc < c)
+                    if dr == 0 and dc == 0:
+                        dr, dc = rng.choice(self._DIRECTIONS)
+                else:
+                    dr, dc = rng.choice(self._DIRECTIONS)
+            new_pos = ((r + dr) % G, (c + dc) % G)
+            if new_pos not in occupied or new_pos == (r, c):
+                occupied.discard((r, c))
+                occupied.add(new_pos)
+                a.grid_pos = new_pos
+            # else: cell occupied → stay
 
 
 class NecessityLifecycleEvent(Event):
@@ -85,8 +113,10 @@ class NecessityLifecycleEvent(Event):
         radius: int,
         grid_size: int,
         consumption_rate: float = 1.0,
+        production_rate: float = 1.0,
     ):
         self.consumption_rate = consumption_rate
+        self.production_rate = production_rate
         radius_sq = radius * radius
         self._farm_cells: set[tuple[int, int]] = {
             (r, c)
@@ -104,26 +134,126 @@ class NecessityLifecycleEvent(Event):
         if not alive:
             return
 
-        # Step 1: consume — track exactly what each agent loses
-        total_consumed = 0.0
+        # Step 1: all agents consume nec
         for a in alive:
             current = a.portfolio.get("nec")
-            consumed = min(current, self.consumption_rate)
-            a.portfolio.set("nec", current - consumed)
-            total_consumed += consumed
+            a.portfolio.set("nec", max(0.0, current - self.consumption_rate))
 
-        # Step 2: redistribute exactly total_consumed to farm agents
-        if total_consumed == 0.0:
+        # Step 2: farm agents gain production_rate nec (not conserved)
+        for a in alive:
+            if a.grid_pos is not None and a.grid_pos in self._farm_cells:
+                a.portfolio.add("nec", self.production_rate)
+
+
+class GardenEvent(Event):
+    """Each tick, agents standing on garden cells receive one flower (timestamped)."""
+
+    def __init__(self, garden_cells: set):
+        self._garden_cells = garden_cells
+
+    def should_trigger(self, tick: int, env: "Environment") -> bool:
+        return True
+
+    def execute(self, env: "Environment", rng: random.Random) -> None:
+        tick = env.current_tick
+        for a in env.agents:
+            if a.alive and a.grid_pos in self._garden_cells:
+                a._flower_ticks.append(tick)
+
+
+class NecRedistributionEvent(Event):
+    """Tax top nec holders every interval ticks; redistribute after a delay.
+
+    Collected nec is held in a buffer and distributed delay_ticks later
+    to the bottom nec holders at that future tick.
+    """
+
+    def __init__(self, start_tick: int = 0, interval: int = 100,
+                 delay_ticks: int = 50,
+                 top_fraction: float = 0.01, tax_rate: float = 0.1,
+                 bottom_fraction: float = 0.1):
+        self.start_tick = start_tick
+        self.interval = interval
+        self.delay_ticks = delay_ticks
+        self.top_fraction = top_fraction
+        self.tax_rate = tax_rate
+        self.bottom_fraction = bottom_fraction
+        # {release_tick: nec_amount}
+        self._buffer: dict[int, float] = {}
+
+    def should_trigger(self, tick: int, env: "Environment") -> bool:
+        return tick >= self.start_tick
+
+    def execute(self, env: "Environment", rng: random.Random) -> None:
+        tick = env.current_tick
+        alive = [a for a in env.agents if a.alive]
+        if not alive:
             return
-        on_farm = [
-            a for a in alive
-            if a.grid_pos is not None and a.grid_pos in self._farm_cells
-        ]
-        if not on_farm:
+
+        # Step 1: collect tax every interval ticks, store for later release
+        if (tick - self.start_tick) % self.interval == 0:
+            n_top = max(1, int(len(alive) * self.top_fraction))
+            top = sorted(alive, key=lambda a: a.portfolio.get("nec"), reverse=True)[:n_top]
+            total_tax = 0.0
+            for a in top:
+                tax = a.portfolio.get("nec") * self.tax_rate
+                a.portfolio.remove("nec", tax)
+                total_tax += tax
+            if total_tax > 0:
+                release_tick = tick + self.delay_ticks
+                self._buffer[release_tick] = self._buffer.get(release_tick, 0.0) + total_tax
+
+        # Step 2: release any buffered nec due this tick
+        if tick in self._buffer:
+            amount = self._buffer.pop(tick)
+            n_bottom = max(1, int(len(alive) * self.bottom_fraction))
+            bottom = sorted(alive, key=lambda a: a.portfolio.get("nec"))[:n_bottom]
+            share = amount / len(bottom)
+            for a in bottom:
+                a.portfolio.add("nec", share)
+
+
+class CoinRedistributionEvent(Event):
+    """Every interval ticks after start_tick: tax top coin holders, give coin to bottom nec holders.
+
+    Tax: top_fraction of agents by coin pay tax_rate of their coin.
+    Recipients: bottom_fraction of agents by nec receive equal coin shares.
+    Conserves total coin exactly.
+    """
+
+    def __init__(self, start_tick: int = 200, interval: int = 100,
+                 top_fraction: float = 0.01, tax_rate: float = 0.1,
+                 bottom_fraction: float = 0.5):
+        self.start_tick = start_tick
+        self.interval = interval
+        self.top_fraction = top_fraction
+        self.tax_rate = tax_rate
+        self.bottom_fraction = bottom_fraction
+
+    def should_trigger(self, tick: int, env: "Environment") -> bool:
+        return tick >= self.start_tick and (tick - self.start_tick) % self.interval == 0
+
+    def execute(self, env: "Environment", rng: random.Random) -> None:
+        alive = [a for a in env.agents if a.alive]
+        if not alive:
             return
-        share = total_consumed / len(on_farm)
-        for a in on_farm:
-            a.portfolio.add("nec", share)
+        n = len(alive)
+        n_top    = max(1, int(n * self.top_fraction))
+        n_bottom = max(1, int(n * self.bottom_fraction))
+
+        top    = sorted(alive, key=lambda a: a.portfolio.get("coin"), reverse=True)[:n_top]
+        bottom = sorted(alive, key=lambda a: a.portfolio.get("nec"))[:n_bottom]
+
+        total_tax = 0.0
+        for a in top:
+            tax = a.portfolio.get("coin") * self.tax_rate
+            a.portfolio.remove("coin", tax)
+            total_tax += tax
+
+        if total_tax > 0 and bottom:
+            share = total_tax / len(bottom)
+            for a in bottom:
+                a.portfolio.add("coin", share)
 
 
 class StarvationWall(Event):
@@ -137,18 +267,13 @@ class StarvationWall(Event):
         return True
 
     def execute(self, env: "Environment", rng: random.Random) -> None:
-        dying    = [a for a in env.agents if a.alive and a.portfolio.get("nec") <= 0]
-        survivors = [a for a in env.agents if a.alive and a.portfolio.get("nec") > 0]
-        if not dying:
-            return
-        # Collect and redistribute coin
-        orphan_coin = sum(a.portfolio.get("coin") for a in dying)
-        for a in dying:
-            a.alive = False
-        if survivors and orphan_coin > 0:
-            share = orphan_coin / len(survivors)
-            for a in survivors:
-                a.portfolio.add("coin", share)
+        for a in env.agents:
+            if a.alive and a.portfolio.get("nec") <= 0:
+                # All assets buried with the agent
+                a.portfolio.set("coin", 0.0)
+                a.portfolio.set("nec", 0.0)
+                a._flower_ticks.clear()
+                a.alive = False
 
 
 class MiningEvent(Event):
@@ -194,6 +319,7 @@ class Environment:
         self.matcher = matcher
         self.interaction = interaction
         self.events: list[Event] = events or []
+        self.current_tick: int = 0
 
     def add_agent(self, agent: Agent) -> None:
         self.agents.append(agent)
@@ -207,6 +333,7 @@ class Environment:
         return dead
 
     def process_events(self, tick: int, rng: random.Random) -> None:
+        self.current_tick = tick
         for event in self.events:
             if event.should_trigger(tick, self):
                 event.execute(self, rng)

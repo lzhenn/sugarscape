@@ -1,26 +1,34 @@
 seed: 42
 simulation:
-  max_ticks: 1000
+  max_ticks: 5000
   grid_size: 200
 agents:
   count: 1000
-  initial_coin: 100.0
-  initial_nec: 50.0        # 50 ticks of consumption buffer
+  initial_coin: 200.0
+  initial_nec: 100.0        # 50 ticks of consumption buffer
 economy:
-  consumption_rate: 1.0    # nec consumed per agent per tick
-  min_reserve: 1.0         # min nec a seller keeps before selling
+  consumption_rate: 0.1    # nec consumed per agent per tick
+  min_reserve: 2.0         # min nec a seller keeps before selling
+  nec_luxury_ticks: 500    # P2 triggers when nec > luxury_ticks * rate
+  nec_tax:
+    start_tick: 0
+    interval: 100          # collect every 100 ticks
+    delay_ticks: 50        # redistribute 50 ticks after collection
+    top_fraction: 0.01     # tax top 1% nec holders
+    tax_rate: 0.1          # take 10% of their nec
+    bottom_fraction: 0.1   # redistribute to bottom 10% by nec
 farms:
-  # 5 farms in dice pattern on 200x200 grid
   centers:
-    - [50,  50]
-    - [50,  150]
-    - [100, 100]
-    - [150, 50]
-    - [150, 150]
-  radius: 30
+   - [105, 105]
+  radius: 20
+  production: 0.5          # nec gained per agent per tick on farm
+garden:
+  center: [60, 60]
+  radius: 10
+  flower_max_age: 1000       # flowers expire after this many ticks
 matcher:
   selector: grid2d
-  radius: 5
+  radius: 5 
 movement: true
 viz:
   fps: 20
